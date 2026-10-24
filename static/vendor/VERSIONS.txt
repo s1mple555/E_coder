@@ -1,0 +1,2 @@
+marked 18.1.1 https://registry.npmjs.org/marked
+dompurify 3.4.17 https://registry.npmjs.org/dompurify

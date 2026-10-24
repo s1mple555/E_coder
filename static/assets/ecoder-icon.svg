@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 64 64" fill="none">
+  <title>E_coder application icon</title>
+  <desc>A white E monogram and mint code bracket on a rounded indigo tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="2" y1="2" x2="62" y2="62" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#838bf0"/>
+      <stop offset="1" stop-color="#4d59c9"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="18" fill="url(#tile)"/>
+  <rect x="3.25" y="3.25" width="57.5" height="57.5" rx="16.75" stroke="#ffffff" stroke-opacity=".16" stroke-width=".5"/>
+  <path d="M34 18H20V46H34M20 32H31" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M43 25L50 32L43 39" stroke="#b9f4e7" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
