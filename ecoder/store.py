@@ -27,6 +27,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS cron_jobs(id TEXT PRIMARY KEY, session TEXT NOT NULL, body TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS goals(session TEXT PRIMARY KEY, body TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS experiences(id TEXT PRIMARY KEY, session TEXT, scope TEXT, fingerprint TEXT, body TEXT, UNIQUE(scope,fingerprint));
+                CREATE TABLE IF NOT EXISTS experience_deletions(scope TEXT, fingerprint TEXT, deleted_at REAL, PRIMARY KEY(scope,fingerprint));
+                CREATE TABLE IF NOT EXISTS learning_jobs(id TEXT PRIMARY KEY, session TEXT, scope TEXT, run_id TEXT, body TEXT);
                 CREATE TABLE IF NOT EXISTS annotations(id TEXT PRIMARY KEY, session TEXT, body TEXT);
             """)
 
@@ -44,7 +46,7 @@ class Store:
                 db.execute("ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
             if "deleted_at" in columns:
                 # One-time migration: remove previously soft-deleted content.
-                for table in ("messages", "events", "tasks", "memories", "uploads", "session_workspaces", "cron_jobs", "goals", "experiences", "annotations"):
+                for table in ("messages", "events", "tasks", "memories", "uploads", "session_workspaces", "cron_jobs", "goals", "experiences", "learning_jobs", "annotations"):
                     db.execute(f"DELETE FROM {table} WHERE session IN (SELECT id FROM sessions WHERE deleted_at IS NOT NULL)")
                 db.execute("DELETE FROM sessions WHERE deleted_at IS NOT NULL")
                 db.execute("ALTER TABLE sessions DROP COLUMN deleted_at")
@@ -78,12 +80,23 @@ class Store:
     def delete_session(self, session):
         """Permanently delete the session and its contents in one transaction."""
         with self.connect() as db:
-            if not db.execute("SELECT 1 FROM sessions WHERE id=? AND archived=0", (session,)).fetchone():
-                return False
-            for table in ("messages", "events", "tasks", "memories", "uploads", "session_workspaces", "cron_jobs", "goals", "experiences", "annotations"):
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute("SELECT 1 FROM sessions WHERE id=? AND archived=0", (session,)).fetchone():return False
+            removed_jobs={row[0] for row in db.execute('SELECT id FROM learning_jobs WHERE session=?',(session,))}
+            for row in db.execute('SELECT id,session,body FROM experiences').fetchall():
+                item=json.loads(row['body'])
+                sources=item.get('sources') or [{'session':item.get('source_session',row['session']),'run_id':item.get('source_run'),'evidence':item.get('evidence',[])}]
+                if row['session']!=session and not any(source.get('session')==session for source in sources):continue
+                remaining=[source for source in sources if source.get('session')!=session and db.execute('SELECT 1 FROM sessions WHERE id=?',(source.get('session'),)).fetchone()]
+                if not remaining:
+                    db.execute('DELETE FROM experiences WHERE id=?',(row['id'],));continue
+                primary=next((source for source in remaining if source.get('session')==item.get('source_session')),remaining[0])
+                item.update(sources=remaining,source_session=primary['session'],source_run=primary['run_id'],evidence=primary['evidence'],confirmations=len(remaining))
+                item['source_jobs']=[identifier for identifier in item.get('source_jobs',[]) if identifier not in removed_jobs]
+                db.execute('UPDATE experiences SET session=?,body=? WHERE id=?',(primary['session'],json.dumps(item,ensure_ascii=False),row['id']))
+            for table in ("messages", "events", "tasks", "memories", "uploads", "session_workspaces", "cron_jobs", "goals", "learning_jobs", "annotations"):
                 db.execute(f"DELETE FROM {table} WHERE session=?", (session,))
-            result = db.execute("DELETE FROM sessions WHERE id=?", (session,))
-            return result.rowcount == 1
+            return db.execute("DELETE FROM sessions WHERE id=?", (session,)).rowcount==1
 
     def rename(self, session, title):
         with self.connect() as db:
@@ -124,6 +137,17 @@ class Store:
     def save_memory(self, session, content):
         with self.connect() as db:
             db.execute("INSERT INTO memories VALUES(?,?) ON CONFLICT(session) DO UPDATE SET content=excluded.content", (session, content[:8000]))
+
+    def edit_memory(self,session,content,expected):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM sessions WHERE id=?',(session,)).fetchone():
+                raise LookupError('会话不存在')
+            row=db.execute('SELECT content FROM memories WHERE session=?',(session,)).fetchone()
+            current=row[0] if row else ''
+            if current!=expected:raise ValueError('备忘录已被更新，请重新载入最新内容后再保存。')
+            db.execute('INSERT INTO memories VALUES(?,?) ON CONFLICT(session) DO UPDATE SET content=excluded.content',(session,content))
+        return content
 
     def crons(self):
         with self.connect() as db:

@@ -4,20 +4,29 @@ import {SessionUsage} from '../lib/usage.js';
 import {ExecutionSummary} from '../lib/timeline.js';
 
 export function useWorkbench(){
-  const s=reactive({status:null,page:'chat',tab:'timeline',sessions:[],session:null,messages:[],events:[],tasks:[],crons:[],goal:null,goalBusy:false,scheduling:false,memory:'',historyCount:0,
+  const s=reactive({status:null,page:'chat',tab:'timeline',sessions:[],session:null,messages:[],messageDisplayOffset:0,events:[],tasks:[],crons:[],goal:null,goalEnabled:false,goalDraft:'',goalBusy:false,scheduling:false,memory:'',historyCount:0,
     running:false,loading:false,uploading:false,creating:false,submitting:false,approvals:[],runs:[],usage:{calls:0,tokens:0,reported:0},
     pending:[],files:[],attachmentIds:new Set(),localFolder:null,fileDirectory:'',filesTruncated:false,prompt:'',toast:'',runLabel:'就绪',streamError:false});
   let stream=null,cursor=0,assistantIndex=null,revision=0,fileRevision=0,timer;
+  let memoryRevision=0;
+  function setMemory(content){memoryRevision++;s.memory=content;}
   const usage=new SessionUsage(),summary=new ExecutionSummary();
   const busy=computed(()=>s.running||s.loading||s.uploading||s.creating||s.submitting||s.goalBusy);
   const title=computed(()=>s.sessions.find(row=>row.id===s.session)?.title||'新的编程任务');
   const compact=computed(()=>s.events.filter(event=>event.type==='context_compact').at(-1));
-  function notify(message){s.toast=message;clearTimeout(timer);timer=setTimeout(()=>s.toast='',5500);}
+  const visibleMessages=computed(()=>s.messages.slice(s.messageDisplayOffset));
+  function clearMessageDisplay(){
+    if(s.loading)return;
+    s.messageDisplayOffset=s.messages.length;
+    notify('已清空当前显示，历史记录与 Agent 上下文保留。');
+  }
+  function restoreMessageDisplay(){s.messageDisplayOffset=0;}
+  function notify(message){s.toast=message;clearTimeout(timer);timer=setTimeout(()=>s.toast='',1000);}
   const safe=fn=>Promise.resolve().then(fn).catch(error=>notify(error.message));
   function disconnect(){stream?.close();stream=null;}
   function reset(){
-    disconnect();cursor=0;assistantIndex=null;usage.reset();summary.reset();
-    Object.assign(s,{messages:[],events:[],tasks:[],crons:[],goal:null,memory:'',historyCount:0,approvals:[],runs:[],usage:{calls:0,tokens:0,reported:0},
+    disconnect();cursor=0;assistantIndex=null;memoryRevision++;usage.reset();summary.reset();
+    Object.assign(s,{messages:[],messageDisplayOffset:0,events:[],tasks:[],crons:[],goal:null,goalEnabled:false,goalDraft:'',memory:'',historyCount:0,approvals:[],runs:[],usage:{calls:0,tokens:0,reported:0},
       pending:[],files:[],attachmentIds:new Set(),localFolder:null,fileDirectory:'',filesTruncated:false,running:false,runLabel:'就绪',streamError:false});
   }
   function updateSummary(event){
@@ -47,7 +56,8 @@ export function useWorkbench(){
         if(!replay){
           s.running=false;s.approvals=[];s.runLabel=({completed:'已结束',failed:'运行失败',cancelled:'已停止',limit_reached:'达到上限',interrupted:'服务已重启'})[event.status]||event.status;
           const id=s.session;safe(refreshSessions);safe(()=>refreshFiles(s.fileDirectory));
-          safe(async()=>{const data=await api(`/api/sessions/${id}`);if(s.session===id){s.tasks=data.tasks;s.crons=data.crons||[];s.goal=data.goal||null;s.memory=data.memory;s.historyCount=data.messages.length;}});
+          const snapshotRevision=revision,snapshotMemory=memoryRevision;
+          safe(async()=>{const data=await api(`/api/sessions/${id}`);const newest=s.events.findLast(item=>item.type==='run_start');if(s.session===id&&snapshotRevision===revision&&(!newest||newest.seq<=event.seq)){s.tasks=data.tasks;s.crons=data.crons||[];s.goal=data.goal||null;if(snapshotMemory===memoryRevision)setMemory(data.memory);s.historyCount=data.messages.length;}});
         }break;
     }
   }
@@ -75,7 +85,7 @@ export function useWorkbench(){
       const data=await api(`/api/sessions/${id}`);if(current!==revision)return;
       s.events=data.events;s.attachmentIds=new Set((data.attachments||[]).map(file=>file.id));s.localFolder=data.local_folder;
       for(const event of data.events)receive(event,true);
-      s.approvals=data.approvals;s.tasks=data.tasks;s.crons=data.crons||[];s.goal=data.goal||null;s.memory=data.memory;s.historyCount=data.messages.length;
+      s.approvals=data.approvals;s.tasks=data.tasks;s.crons=data.crons||[];s.goal=data.goal||null;setMemory(data.memory);s.historyCount=data.messages.length;
       await refreshFiles();if(current!==revision)return;s.running=data.running;s.runLabel=data.running?'运行中':s.crons.length?'等待定时任务':'就绪';if(data.running||s.crons.length)connect();
     }catch(error){if(current===revision)notify(error.message);}finally{if(current===revision)s.loading=false;}
   }
@@ -96,9 +106,9 @@ export function useWorkbench(){
   }
   async function send(){
     if(busy.value||(!s.prompt.trim()&&!s.pending.length))return;
-    s.submitting=true;const message=s.prompt.trim();let id=s.session;
-    try{id=await ensureSession();const result=await action(`/api/sessions/${id}/runs`,{message,attachments:s.pending.map(file=>file.id)});
-      if(s.session===id){s.prompt='';s.pending=[];if('goal' in result){s.goal=result.goal;s.tab='goal';}
+    s.submitting=true;const submittedPrompt=s.prompt,message=submittedPrompt.trim(),submittedGoal=s.goalDraft,goalEnabled=s.goalEnabled,attachments=s.pending.map(file=>file.id);let id=s.session;
+    try{id=await ensureSession();const result=await action(`/api/sessions/${id}/runs`,{message,attachments,goal_enabled:goalEnabled,goal_condition:goalEnabled?submittedGoal.trim():''});
+      if(s.session===id){if(s.prompt===submittedPrompt)s.prompt='';s.pending=s.pending.filter(file=>!attachments.includes(file.id));if(s.goalDraft===submittedGoal)s.goalDraft='';if('goal' in result){s.goal=result.goal;s.tab='goal';}
         if(result.run_id!==null){s.running=true;s.runLabel='运行中';connect();}else{notify(result.message||'目标状态已更新');}}}
     catch(error){notify(error.message);}finally{s.submitting=false;}
   }
@@ -169,5 +179,5 @@ export function useWorkbench(){
   }
   function dispose(){revision++;disconnect();clearTimeout(timer);}
   onBeforeUnmount(dispose);
-  return {s,busy,title,compact,notify,safe,loadStatus,refreshSessions,refreshFiles,refreshCrons,createCron,cancelCron,refreshGoal,startGoal,controlGoal,openSession,newSession,deleteSession,send,stop,approve,addFile,upload,bindFolder,afterClean,initialize,receive,dispose};
+  return {s,busy,title,compact,setMemory,visibleMessages,clearMessageDisplay,restoreMessageDisplay,notify,safe,loadStatus,refreshSessions,refreshFiles,refreshCrons,createCron,cancelCron,refreshGoal,startGoal,controlGoal,openSession,newSession,deleteSession,send,stop,approve,addFile,upload,bindFolder,afterClean,initialize,receive,dispose};
 }

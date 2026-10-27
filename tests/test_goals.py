@@ -238,3 +238,36 @@ def test_goal_api_and_slash_commands(harness):
         assert client.post(base+'/goal/control',json={'action':'resume'}).status_code==409
         assert client.delete(base).status_code==200
         assert app.state.store.goal(session) is None
+
+
+@pytest.mark.parametrize('custom',['','输出必须包含 VERIFIED'])
+def test_composer_goal_flag_runs_independent_check(harness,custom):
+    settings,*_=harness
+    app=create_app(settings);runtime=app.state.runtime
+    runtime.provider=MainText('VERIFIED');runtime.goal_provider=judge=Judge([decision(True)])
+    with TestClient(app) as client:
+        session=client.post('/api/sessions').json()['id'];base=f'/api/sessions/{session}'
+        result=client.post(base+'/runs',json={'message':'验证这个任务','goal_enabled':True,'goal_condition':custom})
+        assert result.status_code==200
+        for _ in range(100):
+            data=client.get(base).json()
+            if not data['running']:break
+            time.sleep(.01)
+        assert data['goal']['condition']==(custom or '验证这个任务')
+        assert data['goal']['status']=='achieved' and len(judge.requests)==1
+        assert app.state.store.messages(session)[0]['content']=='验证这个任务'
+
+
+def test_unselected_composer_goal_does_not_adopt_prior_goal(harness):
+    settings,*_=harness
+    app=create_app(settings);runtime=app.state.runtime
+    runtime.provider=MainText();runtime.goal_provider=judge=Judge([])
+    with TestClient(app) as client:
+        session=client.post('/api/sessions').json()['id'];base=f'/api/sessions/{session}'
+        runtime.goals.set_goal(session,'此前未完成目标')
+        assert client.post(base+'/runs',json={'message':'普通聊天','goal_enabled':False}).status_code==200
+        for _ in range(100):
+            if not client.get(base).json()['running']:break
+            time.sleep(.01)
+        assert judge.requests==[]
+        assert runtime.goals.status(session)['condition']=='此前未完成目标'

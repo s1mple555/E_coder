@@ -1,5 +1,8 @@
 import secrets
 import time
+import logging
+import httpx
+from .learning import LearningError
 from typing import Literal
 from fastapi import APIRouter,HTTPException,Request
 from fastapi.responses import HTMLResponse,FileResponse
@@ -8,7 +11,9 @@ from .preview import Preview
 
 class Model(BaseModel):model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
 class Extract(Model):
-    run_id:str=Field(max_length=80)
+    run_id:str=Field(default="",max_length=80)
+    focus:str=Field(default="",max_length=2000)
+    source_scope:Literal["run","session"]="run"
     confirmed:bool=False
 class Toggle(Model):enabled:bool
 class Entry(Model):entry:str=Field(min_length=1,max_length=500)
@@ -33,19 +38,48 @@ def routes(runtime,require):
         if value['scope']!=runtime.learning.scope(session):raise HTTPException(409,'工作区已切换，请刷新预览')
         return value
     @router.get('/experiences')
-    def experiences(session:str):require(session);return {'experiences':runtime.learning.list(session)}
+    def experiences(session:str):require(session);return {'experiences':runtime.learning.list(session),'jobs':runtime.learning.jobs(session)}
+    @router.post('/experiences/jobs',status_code=202)
+    async def submit_learning(session:str,body:Extract):
+        require(session)
+        try:
+            runtime.ensure_idle(session)
+            return {'job':runtime.learning.submit(session,body.run_id,body.confirmed,focus=body.focus,source_scope=body.source_scope)}
+        except ValueError as error:raise HTTPException(409,str(error)) from None
+    @router.delete('/experiences/{identifier}')
+    def delete_learning(session:str,identifier:str):
+        require(session)
+        try:runtime.learning.delete(session,identifier)
+        except ValueError as error:raise HTTPException(404,str(error)) from None
+        return {'deleted':True}
     @router.post('/experiences/extract')
     async def extract(session:str,body:Extract):
         require(session)
         try:
             runtime.ensure_idle(session)
-            return {'experiences':await runtime.learning.extract(session,body.run_id,body.confirmed)}
-        except (ValueError,TimeoutError):raise HTTPException(400,'无法提取：请确认轮次已成功完成且含工具证据；模型必须返回有效经验与证据引用')
+            return {'experiences':await runtime.learning.extract(session,body.run_id,body.confirmed,focus=body.focus,source_scope=body.source_scope)}
+        except LearningError as error:
+            logging.getLogger(__name__).warning('Experience extraction failed [%s]',error.code)
+            raise HTTPException(400,str(error)) from None
+        except (TimeoutError,httpx.TimeoutException):
+            logging.getLogger(__name__).warning('Experience extraction failed [timeout]')
+            raise HTTPException(504,'整理方案超时，模型未在等待期限内完成，请稍后重试。') from None
+        except httpx.HTTPError:
+            logging.getLogger(__name__).warning('Experience extraction failed [network]')
+            raise HTTPException(502,'无法连接模型服务，请检查网络和连接配置后重试。') from None
+        except ValueError:
+            logging.getLogger(__name__).warning('Experience extraction failed [precondition]')
+            raise HTTPException(400,'无法提取：请确认任务已结束、已确认成功、包含工具证据，且工作区未切换。') from None
     @router.patch('/experiences/{identifier}')
     def toggle(session:str,identifier:str,body:Toggle):
         require(session)
         try:return runtime.learning.update(session,identifier,body.enabled)
         except ValueError as e:raise HTTPException(400,str(e))
+    @router.get('/preview/entries')
+    async def preview_entries(session:str):
+        require(session)
+        import asyncio
+        return await asyncio.to_thread(preview.entries,session)
     @router.post('/preview')
     def create(session:str,body:Entry,request:Request):
         require(session)

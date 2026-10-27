@@ -44,3 +44,5 @@ The original white theme, compact cards/header, stable scrollbar gutter, local f
 Vitest tests cover SSE deduplication and replay, cumulative token snapshots, stale-session races, stream cleanup, duplicate run submission, failed-run draft retention, approval restoration, folder references, removed attachment reconciliation, Markdown sanitization, modal cancellation, stale Skill responses, configuration credential handling and signed cleanup confirmation.
 
 Tests use mocked network responses; no model call or real storage deletion is performed.
+
+部署按 generations 清单保留最近三代完整 JS/CSS 及懒加载依赖，清理更早的受管理哈希产物，不删除自定义资源。保持旧页面跨部署打开时，超过保留代数后应刷新。npm test 同时运行 Vue 测试、Token/事件聚合测试与部署保留测试。

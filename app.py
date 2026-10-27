@@ -46,11 +46,13 @@ def create_app(settings=None):
                             store.append(session["id"], {"role": "tool", "tool_call_id": call["id"], "content": '{"error":"服务重启，工具结果未知，请检查文件"}'})
                 store.event(session["id"], "run_end", status="interrupted", elapsed_ms=0)
         runtime.goals.recover()
+        runtime.learning.recover()
         runtime.scheduler.start()
         try:
             yield
         finally:
             await runtime.scheduler.stop()
+            await runtime.learning.stop()
             for session_id in list(runtime.active):
                 await runtime.stop(session_id, shutdown=True)
 
@@ -108,6 +110,23 @@ def create_app(settings=None):
                              "base_url": settings.base_url, "model": settings.model},
                             headers={"Cache-Control": "no-store"})
 
+    @app.post("/api/permissions")
+    async def update_permissions(body: PermissionConfig):
+        nonlocal settings
+        if runtime.active:
+            raise HTTPException(409, "有任务正在运行，请结束或停止所有任务后再切换权限。")
+        try:
+            updated = save_model_settings(settings, base_url=settings.base_url, model=settings.model,
+                                          permission_mode=body.permission_mode)
+        except OSError:
+            raise HTTPException(500, "无法保存权限配置，请检查项目目录写入权限。")
+        settings = updated
+        runtime.settings = updated
+        runtime.provider.settings = updated
+        runtime.goal_provider.settings = updated
+        runtime.learning.provider.settings = updated
+        return {"saved": True, "permission_mode": settings.permission_mode}
+
     @app.middleware("http")
     async def local_boundary(request: Request, call_next):
         # Local personal service. Reject cross-origin writes / DNS rebinding.
@@ -126,12 +145,27 @@ def create_app(settings=None):
         if not store.exists(session):
             raise HTTPException(404, "会话不存在")
 
-    from ecoder.feature_routes import routes
+    from ecoder.feature_routes import routes, Toggle
     app.include_router(routes(runtime, require))
+
+    @app.get('/api/experiences')
+    def all_experiences():
+        return {'experiences':runtime.learning.list_all(),'jobs':[]}
+
+    @app.patch('/api/experiences/{identifier}')
+    def update_any_experience(identifier:str,body:Toggle):
+        try:return runtime.learning.update(None,identifier,body.enabled)
+        except ValueError:raise HTTPException(404,'经验不存在') from None
+
+    @app.delete('/api/experiences/{identifier}')
+    def delete_any_experience(identifier:str):
+        try:runtime.learning.delete(None,identifier)
+        except ValueError:raise HTTPException(404,'经验不存在') from None
+        return {'deleted':True}
 
     @app.get("/api/status")
     def status():
-        return {"mode": settings.mode, "model": settings.model, "configured": bool(settings.api_key), "base_url": settings.base_url, "tools": tools.catalog(), "skills": skills.summary(), "max_steps": settings.max_steps, "goal_block_cap":settings.goal_block_cap,"context_chars": settings.context_chars, "sandbox": {"default_mode":"sandbox", "backend":"windows-appcontainer", "supported":os.name == "nt", "network":False,"host_requires_approval":True}, "scheduler": runtime.scheduler.status()}
+        return {"permission_mode": settings.permission_mode, "mode": settings.mode, "model": settings.model, "configured": bool(settings.api_key), "base_url": settings.base_url, "tools": tools.catalog(), "skills": skills.summary(), "max_steps": settings.max_steps, "goal_block_cap":settings.goal_block_cap,"context_chars": settings.context_chars, "sandbox": {"default_mode":"host" if settings.permission_mode == "full" else "sandbox", "backend":"windows-appcontainer", "supported":os.name == "nt", "network":settings.permission_mode == "full","host_requires_approval":settings.permission_mode != "full"}, "scheduler": runtime.scheduler.status()}
 
     @app.get("/api/sessions")
     def sessions():
@@ -155,6 +189,21 @@ def create_app(settings=None):
     def get_session(session: str):
         require(session)
         return {"messages": store.messages(session), "events": store.events(session), "tasks": store.tasks(session), "memory": store.memory(session), "running": session in runtime.active, "approvals": runtime.pending(session), "local_folder":uploads.local_folder(session), "attachments":uploads.records(session), "crons": runtime.scheduler.list_jobs(session),'goal':runtime.goals.status(session)}
+
+    @app.get('/api/sessions/{session}/memory')
+    async def get_memory(session:str):
+        require(session)
+        return {'memory':store.memory(session)}
+
+    @app.put('/api/sessions/{session}/memory')
+    async def edit_memory(session:str,body:MemoryEdit):
+        require(session)
+        if session in runtime.active:
+            raise HTTPException(409,'当前会话有任务运行，请结束或停止后再保存备忘录。')
+        try:content=store.edit_memory(session,body.content,body.expected)
+        except LookupError:raise HTTPException(404,'会话不存在') from None
+        except ValueError as error:raise HTTPException(409,str(error)) from None
+        return {'saved':True,'memory':content}
 
     @app.get('/api/sessions/{session}/goal')
     async def get_goal(session: str):
@@ -282,7 +331,11 @@ def create_app(settings=None):
                     action = command.lower() if command.lower() in {'pause','resume'} else 'clear'
                     return await runtime.goals.control(session,action)
                 return {'run_id':runtime.goals.start(session,command,body.attachments),'goal':runtime.goals.status(session)}
-            return {"run_id": runtime.start(session, body.message.strip(), body.attachments)}
+            if body.goal_enabled:
+                condition = body.goal_condition.strip() or text
+                return {'run_id':runtime.goals.start(session,condition,body.attachments,message=text),
+                        'goal':runtime.goals.status(session)}
+            return {"run_id": runtime.start(session, text, body.attachments, goal_enabled=body.goal_enabled is not False)}
         except ValueError as error:
             raise HTTPException(409, str(error))
 
@@ -344,6 +397,8 @@ def create_app(settings=None):
 
 
 class Chat(BaseModel):
+    goal_enabled: bool | None = None
+    goal_condition: str = Field(default="",max_length=4000)
     message: str = Field(default="", max_length=20000)
     attachments: list[str] = Field(default_factory=list, max_length=30)
 
@@ -352,6 +407,12 @@ class Chat(BaseModel):
         if not self.message.strip() and not self.attachments:
             raise ValueError("请输入内容或选择附件")
         return self
+
+
+class MemoryEdit(BaseModel):
+    model_config = ConfigDict(extra='forbid',strict=True)
+    content:str=Field(max_length=8000)
+    expected:str=Field(max_length=8000)
 
 
 class Approval(BaseModel):
@@ -376,6 +437,11 @@ class Folder(BaseModel):
 class StorageDelete(BaseModel):
     model_config = ConfigDict(extra="forbid")
     files: list[str] = Field(min_length=1, max_length=500)
+
+
+class PermissionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    permission_mode: Literal["approval", "full"]
 
 
 class ModelConfig(BaseModel):

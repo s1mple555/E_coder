@@ -4,7 +4,7 @@ import Icon from './Icon.vue';
 import BaseDialog from './BaseDialog.vue';
 const props=defineProps({work:Object});
 const recent=ref(false),deleting=ref(null);
-const pages=[['chat','chat','工作台'],['tools','tools','工具箱'],['skills','skills','Skills'],['storage','storage','存储管理'],['settings','settings','连接与配置']];
+const pages=[['chat','chat','工作台'],['tools','tools','工具箱'],['skills','skills','Skills'],['experiences','skills','经验管理'],['storage','storage','存储管理'],['settings','settings','连接与配置']];
 async function remove(id){if(deleting.value)return;deleting.value=id;try{await props.work.deleteSession(id);}catch(error){props.work.notify(error.message);}finally{deleting.value=null;}}
 function open(id){recent.value=false;props.work.openSession(id);}
 </script>

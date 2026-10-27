@@ -1,11 +1,12 @@
 """Static build previews in opaque-origin iframes and durable visual feedback."""
 import hashlib
 import json
-import mimetypes
+import os
 import re
 from pathlib import Path
 from urllib.parse import quote
 from .store import uid
+from .tools import SKIP
 
 ALLOWED={'.html','.htm','.css','.js','.mjs','.json','.png','.jpg','.jpeg','.gif','.webp','.svg','.ico','.woff','.woff2','.ttf','.map'}
 
@@ -17,6 +18,46 @@ class Preview:
             db.execute('CREATE TABLE IF NOT EXISTS annotations(id TEXT PRIMARY KEY, session TEXT, body TEXT)')
 
     def tools(self,session):return self.runtime.uploads.tools(session) if self.runtime.uploads else self.runtime.tools
+
+    def entries(self,session):
+        tools=self.tools(session);related=set();generated=set();calls={}
+        for event in self.runtime.store.events(session):
+            if event['type']=='tool_start' and isinstance(event.get('arguments'),dict):
+                value=event['arguments'].get('path')
+                if not isinstance(value,str):continue
+                try:path=tools.path(value)
+                except (ValueError,OSError):continue
+                if path.suffix.lower() in {'.html','.htm'}:
+                    related.add(path)
+                    calls[event.get('call_id')]=(event.get('name'),path)
+            elif event['type']=='tool_end' and event.get('call_id') in calls:
+                name,path=calls[event['call_id']]
+                result=event.get('result')
+                if name in {'write_file','edit_file'} and not (isinstance(result,dict) and 'error' in result):generated.add(path)
+        entries=[];scanned=0;truncated=False
+        for parent,dirs,files in os.walk(tools.root,followlinks=False):
+            scanned+=1+len(dirs)+len(files)
+            if scanned>20000:truncated=True;break
+            allowed=[]
+            for name in sorted(dirs):
+                candidate=Path(parent)/name
+                if name.casefold() in SKIP or candidate.is_symlink() or candidate.is_junction():continue
+                try:tools.path(str(candidate))
+                except (ValueError,OSError):continue
+                allowed.append(name)
+            dirs[:]=allowed
+            for name in sorted(files):
+                candidate=Path(parent)/name
+                if candidate.suffix.lower() not in {'.html','.htm'} or candidate.is_symlink():continue
+                try:
+                    path=self.asset(session,str(candidate))
+                    entry=path.relative_to(tools.root).as_posix()
+                except (ValueError,OSError):continue
+                entries.append({'path':entry,'related':path in related,'generated':path in generated})
+                if len(entries)>=1000:truncated=True;break
+            if truncated:break
+        entries.sort(key=lambda item:(not item['generated'],not item['related'],item['path'].casefold()))
+        return {'entries':entries,'truncated':truncated}
 
     def asset(self,session,entry):
         path=self.tools(session).path(entry)

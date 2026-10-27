@@ -15,10 +15,17 @@ async def permission_hook(context):
             context.tools.path(context.args["path"], read_only=context.name == "read_file")
         if SPECS[context.name][2] != "approval":
             return None
+        if context.runtime.settings.permission_mode == "full" and context.name == "run_command":
+            context.args["execution_mode"] = "host"
         context.prepared = context.tools.preview(context.name, context.args)
     except ValueError as error:
         return str(error)[:1500]
     runtime, session, run = context.runtime, context.session, context.run
+    if runtime.settings.permission_mode == "full":
+        runtime.emit(session, run, "permission_auto_allow", call_id=context.call_id,
+                     name=context.name, permission_mode="full", arguments=context.args,
+                     preview={k: v for k, v in context.prepared.items() if k not in {"before", "after"}})
+        return None
     approval_id = uid()
     timeout = runtime.approval_timeout
     future = asyncio.get_running_loop().create_future()

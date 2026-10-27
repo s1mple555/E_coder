@@ -107,12 +107,12 @@ class GoalController:
                 await self.runtime.stop(session)
         return {'run_id':None,'goal':self.status(session)}
 
-    def start(self, session, condition, attachments=None):
+    def start(self, session, condition, attachments=None, *, message=None):
         self.runtime.ensure_idle(session)
         if self.runtime.uploads:
             self.runtime.uploads.selected(session,attachments or [])
         self.set_goal(session,condition)
-        return self.runtime.start(session,condition,attachments)
+        return self.runtime.start(session,condition if message is None else message,attachments)
 
     def record_usage(self, session, run, total, judge=False):
         if not run.goal_id:

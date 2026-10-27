@@ -10,7 +10,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "deploy": "node scripts/deploy.mjs",
-    "test": "vitest run"
+    "test": "vitest run && node --test ../tests/usage.test.mjs ../tests/timeline.test.mjs ../tests/deploy.test.mjs"
   },
   "dependencies": {
     "dompurify": "3.4.17",

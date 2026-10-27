@@ -107,3 +107,73 @@ def test_project_scope_and_restart(harness,tmp_path):
     assert runtime.learning.list(session)==[]
     with pytest.raises(ValueError):runtime.learning.update(session,rows[0]['id'],False)
     tools.root=old
+
+
+def test_reflection_context_preserves_evidence_and_json_for_long_traces():
+    from ecoder.learning import reflection_context
+    trace=[{'type':'user_message','content':'诊断检索流程 token=hidden-value'}]
+    for index in range(9):
+        trace.append({'type':'tool_end','seq':index+10,'name':'run_command','result':{'exit_code':0,'output':'key-value-to-redact '+('DATA '*15000)}})
+    trace.extend({'type':'text_delta','content':'最终结果'} for _ in range(2000))
+    text,evidence=reflection_context(trace,'key-value-to-redact')
+    document=json.loads(text)
+    assert len(text)<=24000
+    assert evidence==set(range(10,19))
+    assert set(document['allowed_success_evidence'])==evidence
+    assert {item['seq'] for item in document['tools']}==evidence
+    assert 'key-value-to-redact' not in text and 'hidden-value' not in text
+    assert document['task'].startswith('诊断检索流程')
+
+
+@pytest.mark.parametrize('failure,expected_status,expected_text',[
+    ('json',400,'不是有效 JSON'),('citation',400,'工具证据'),
+    ('timeout',504,'超时'),('network',502,'无法连接模型服务'),('fields',400,'字段或长度')])
+def test_extraction_reports_specific_safe_error(harness,failure,expected_status,expected_text):
+    import httpx
+    settings,_,_,_,_=harness
+    class BrokenReflector:
+        async def stream(self,messages,tools):
+            if failure=='timeout':raise TimeoutError()
+            if failure=='network':raise httpx.ConnectError('private-provider-secret')
+            if failure=='json':content='not-json-private-model-output'
+            elif failure=='fields':content=json.dumps({'lessons':[{'title':'private-field-value'}]})
+            else:content=json.dumps({'lessons':[{'title':'方法','when':'条件','strategy':'验证','evidence':[999999]}]})
+            yield {'type':'response','message':{'content':content}}
+    with TestClient(create_app(settings)) as client:
+        session=client.post('/api/sessions').json()['id'];runtime=client.app.state.runtime
+        seed(runtime.store,session);runtime.learning.provider=BrokenReflector()
+        response=client.post(f'/api/sessions/{session}/experiences/extract',json={'run_id':'r','confirmed':True})
+        assert response.status_code==expected_status
+        assert expected_text in response.json()['detail']
+        assert 'private' not in response.text
+        assert runtime.learning.list(session)==[]
+
+
+def test_preview_dropdown_discovers_nested_pages_and_prioritizes_successful_generated_files(harness):
+    settings,*_=harness
+    with TestClient(create_app(settings)) as client:
+        session=client.post('/api/sessions').json()['id'];runtime=client.app.state.runtime
+        root=runtime.uploads.workspace(session);root.mkdir(parents=True,exist_ok=True)
+        for entry in ['index.html','dist/index.html','pages/profile.HTM','.git/hidden.html','node_modules/hidden.html','.venv/hidden.html']:
+            path=root/entry;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('<h1>Test</h1>',encoding='utf-8')
+        runtime.store.event(session,'tool_start',call_id='ok',name='write_file',arguments={'path':'dist/index.html'})
+        runtime.store.event(session,'tool_end',call_id='ok',name='write_file',result={'path':'dist/index.html'})
+        runtime.store.event(session,'tool_start',call_id='bad',name='write_file',arguments={'path':'index.html'})
+        runtime.store.event(session,'tool_end',call_id='bad',name='write_file',result={'error':'denied'})
+        result=client.get(f'/api/sessions/{session}/preview/entries')
+        assert result.status_code==200
+        entries=result.json()['entries'];assert entries[0]['path']=='dist/index.html' and entries[0]['generated']
+        assert {entry['path'] for entry in entries}=={'index.html','dist/index.html','pages/profile.HTM'}
+        assert not next(entry for entry in entries if entry['path']=='index.html')['generated']
+        assert not result.json()['truncated']
+        assert client.get('/api/sessions/missing/preview/entries').status_code==404
+
+
+def test_preview_entries_and_assets_reject_escape_links(harness):
+    from ecoder.preview import Preview
+    settings,_,tools,runtime,session=harness
+    outside=settings.root/'external.html';outside.write_text('<h1>Outside</h1>')
+    try:(tools.root/'escape.html').symlink_to(outside)
+    except OSError:pytest.skip('symlink privilege unavailable')
+    assert Preview(runtime).entries(session)['entries']==[]
+    with pytest.raises(ValueError):Preview(runtime).asset(session,'../external.html')

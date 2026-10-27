@@ -12,7 +12,7 @@ async function submit(){
 }
 </script>
 <template><div class="cron-panel">
-<p class="section-note">按北京时间执行，服务需保持运行。写入和命令仍需审批。</p>
+
 <form class="cron-form" @submit.prevent="work.safe(submit)">
   <label>执行频率<select v-model="frequency" aria-label="执行频率"><option value="daily">每天</option><option value="workdays">周一至周五</option><option value="weekly">每周</option><option value="interval">固定间隔</option><option value="once">仅执行一次</option><option value="advanced">高级：自定义 Cron</option></select></label>
   <label v-if="frequency==='weekly'">星期<select v-model="weekday" aria-label="执行星期"><option v-for="(day,index) in weekdays" :key="index" :value="String(index)">{{day}}</option></select></label>

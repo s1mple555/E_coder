@@ -1,6 +1,5 @@
 import asyncio
 import difflib
-import json
 import os
 import time
 from pathlib import Path

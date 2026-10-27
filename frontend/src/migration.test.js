@@ -27,6 +27,30 @@ beforeEach(()=>{
 afterEach(()=>{for(const wrapper of wrappers)wrapper.unmount();wrappers=[];document.body.innerHTML='';vi.unstubAllGlobals();});
 
 describe('stream/session migration',()=>{
+  it('keeps text typed while a message request is pending',async()=>{
+    const work=createWork();work.s.session='s';work.s.prompt='first';let release;
+    fetch.mockImplementation(()=>new Promise(resolve=>release=resolve));const pending=work.send();await flushPromises();
+    work.s.prompt='next message';release(respond({run_id:'r'}));await pending;expect(work.s.prompt).toBe('next message');
+  });
+  it('preserves goal criteria when creating the first session',async()=>{
+    const work=createWork();render(GoalPanel,{props:{work}});work.s.prompt='work';work.s.goalEnabled=true;work.s.goalDraft='CUSTOM_ACCEPTANCE';let payload;
+    fetch.mockImplementation(async(url,options)=>{if(url==='/api/sessions'&&options?.method==='POST')return respond({id:'new'});if(url==='/api/sessions')return respond([{id:'new'}]);payload=JSON.parse(options.body);return respond({run_id:'r'});});
+    await work.send();expect(payload.goal_condition).toBe('CUSTOM_ACCEPTANCE');
+  });
+  it('does not overwrite manual memory with an older run-end response',async()=>{
+    const work=createWork();work.s.session='s';let release;
+    fetch.mockImplementation(async url=>url==='/api/sessions/s'?new Promise(resolve=>release=resolve):respond(String(url).includes('/files')?{files:[]}:[]));
+    work.receive({seq:1,type:'run_start',run_id:'r'});work.receive({seq:2,type:'run_end',run_id:'r',status:'completed'});await flushPromises();
+    work.setMemory('MANUAL_UPDATE');release(respond({...emptySession,memory:'OLD_SNAPSHOT'}));await flushPromises();expect(work.s.memory).toBe('MANUAL_UPDATE');
+  });
+
+  it('sends selected goal mode and optional criteria together with the user message',async()=>{
+    const work=createWork();work.s.session='s';work.s.prompt='验证计算器';work.s.goalEnabled=true;work.s.goalDraft='断言通过';
+    fetch.mockResolvedValue(respond({run_id:'r',goal:{id:'g',condition:'断言通过',status:'active'}}));
+    await work.send();expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({message:'验证计算器',attachments:[],goal_enabled:true,goal_condition:'断言通过'});
+    expect(work.s.goal.id).toBe('g');expect(work.s.goalDraft).toBe('');expect(work.s.goalEnabled).toBe(true);
+  });
+
   it('handles /goal status without inventing an active model run',async()=>{
     const work=createWork();work.s.session='s';work.s.prompt='/goal';
     fetch.mockResolvedValue(respond({run_id:null,goal:{id:'g',status:'paused',condition:'verify'}}));
